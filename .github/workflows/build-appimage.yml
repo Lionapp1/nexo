@@ -18,7 +18,7 @@ jobs:
         run: |
           set -euo pipefail
           sudo apt-get update
-          sudo apt-get install -y cmake ninja-build pkg-config gcc g++ libgtk-4-dev libwebkitgtk-6.0-dev librsvg2-dev patchelf file xvfb
+          sudo apt-get install -y cmake ninja-build pkg-config gcc g++ libgtk-4-dev libwebkitgtk-6.0-dev librsvg2-dev patchelf file xvfb imagemagick
 
       - name: Configure
         run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=/usr
@@ -36,30 +36,30 @@ jobs:
           cp packaging/icons/nexo.svg AppDir/usr/share/icons/hicolor/scalable/apps/nexo.svg
           test -x AppDir/usr/bin/nexo
 
-          # WebKitGTK launches WebKitWebProcess/WebKitNetworkProcess/WebKitGPUProcess
-          # as auxiliary executables. Bundle them explicitly so the AppImage can
-          # render real pages instead of starting with a blank WebView.
+          # Ubuntu's WebKitGTK package installs the helper processes in a
+          # versioned multiarch libexec directory. They are not discovered from
+          # an arbitrary WEBKIT_EXEC_PATH in a normal distro build.
           process_dir="$(dirname "$(find /usr -type f -name WebKitWebProcess -print -quit)")"
           test -n "$process_dir"
           test -x "$process_dir/WebKitWebProcess"
-          mkdir -p AppDir/usr/bin/webkit-processes
-          for process in WebKitWebProcess WebKitNetworkProcess WebKitGPUProcess; do
-            if [ -x "$process_dir/$process" ]; then
-              cp -a "$process_dir/$process" AppDir/usr/bin/webkit-processes/
-            fi
-          done
-          if [ -d "$process_dir/injected-bundle" ]; then
-            cp -a "$process_dir/injected-bundle" AppDir/usr/bin/webkit-processes/
+          mkdir -p AppDir/usr/lib/x86_64-linux-gnu/webkitgtk-6.0/injected-bundle
+          cp -a "$process_dir/WebKitWebProcess" AppDir/usr/lib/x86_64-linux-gnu/webkitgtk-6.0/
+          cp -a "$process_dir/WebKitNetworkProcess" AppDir/usr/lib/x86_64-linux-gnu/webkitgtk-6.0/
+          if [ -x "$process_dir/WebKitGPUProcess" ]; then
+            cp -a "$process_dir/WebKitGPUProcess" AppDir/usr/lib/x86_64-linux-gnu/webkitgtk-6.0/
           fi
-          test -x AppDir/usr/bin/webkit-processes/WebKitWebProcess
-          test -x AppDir/usr/bin/webkit-processes/WebKitNetworkProcess
+          if [ -f "$process_dir/injected-bundle/libwebkitgtkinjectedbundle.so" ]; then
+            cp -a "$process_dir/injected-bundle/libwebkitgtkinjectedbundle.so" AppDir/usr/lib/x86_64-linux-gnu/webkitgtk-6.0/injected-bundle/
+          fi
+          test -x AppDir/usr/lib/x86_64-linux-gnu/webkitgtk-6.0/WebKitWebProcess
+          test -x AppDir/usr/lib/x86_64-linux-gnu/webkitgtk-6.0/WebKitNetworkProcess
 
-      - name: Smoke test native build with real WebView
+      - name: Native WebView smoke test
         run: |
           set -euo pipefail
-          export WEBKIT_EXEC_PATH="$PWD/AppDir/usr/bin/webkit-processes"
           export NEXO_SMOKE_TEST=1
           export GDK_BACKEND=x11
+          export WEBKIT_DISABLE_SANDBOX_THIS_IS_DANGEROUS=1
           timeout 30s xvfb-run -a ./AppDir/usr/bin/nexo 2>&1 | tee native-smoke.log
           grep -q 'NEXO_SMOKE_OK' native-smoke.log
 
@@ -84,20 +84,39 @@ jobs:
             --icon-file AppDir/usr/share/icons/hicolor/scalable/apps/nexo.svg \
             --executable AppDir/usr/bin/nexo
 
-          # linuxdeploy can create an AppRun, but Nexo needs an explicit WebKit
-          # subprocess path because those helpers are loaded dynamically.
+          # WebKitGTK's normal Ubuntu build has the helper path compiled into
+          # libwebkitgtk. Replace that absolute path with a fixed /tmp location
+          # of the same byte length, then AppRun points that location at the
+          # read-only AppImage mount. This is the same relocation strategy used
+          # by other WebKitGTK AppImages.
+          python3 - <<'PY'
+          from pathlib import Path
+          old = b"/usr/lib/x86_64-linux-gnu/webkitgtk-6.0"
+          new = b"/tmp/.nexo-appimage.dir/webkitgtk-6.0xx"
+          assert len(old) == len(new), (len(old), len(new))
+          lib = Path("AppDir/usr/lib/libwebkitgtk-6.0.so.4")
+          data = lib.read_bytes()
+          count = data.count(old)
+          assert count >= 1, f"WebKit helper path not found in {lib}"
+          lib.write_bytes(data.replace(old, new))
+          print(f"Patched {count} WebKitGTK helper path(s)")
+          PY
+
           cat > AppDir/AppRun <<'EOF'
           #!/bin/sh
           set -eu
           HERE="$(CDPATH= cd -- "$(dirname -- "$(readlink -f -- "$0")")" && pwd)"
-          export LD_LIBRARY_PATH="$HERE/usr/lib:$HERE/usr/lib/x86_64-linux-gnu:${LD_LIBRARY_PATH:-}"
-          export WEBKIT_EXEC_PATH="$HERE/usr/bin/webkit-processes"
+          export APPDIR="$HERE"
+          export GIO_MODULE_DIR="$HERE/usr/lib/gio/modules"
+          export WEBKIT_DISABLE_SANDBOX_THIS_IS_DANGEROUS=1
+          mkdir -p /tmp/.nexo-appimage.dir
+          ln -sfn "$HERE/usr/lib/x86_64-linux-gnu/webkitgtk-6.0" /tmp/.nexo-appimage.dir/webkitgtk-6.0xx
           exec "$HERE/usr/bin/nexo" "$@"
           EOF
           chmod +x AppDir/AppRun
           test -x AppDir/AppRun
-          test -x AppDir/usr/bin/webkit-processes/WebKitWebProcess
-          test -x AppDir/usr/bin/webkit-processes/WebKitNetworkProcess
+          test -x AppDir/usr/lib/x86_64-linux-gnu/webkitgtk-6.0/WebKitWebProcess
+          test -x AppDir/usr/lib/x86_64-linux-gnu/webkitgtk-6.0/WebKitNetworkProcess
 
       - name: Build AppImage
         env:
@@ -108,13 +127,32 @@ jobs:
           test -s Nexo-x86_64.AppImage
           file Nexo-x86_64.AppImage
 
-      - name: Smoke test AppImage with real WebView
+      - name: AppImage real WebView smoke test
         run: |
           set -euo pipefail
           export NEXO_SMOKE_TEST=1
           export GDK_BACKEND=x11
+          export WEBKIT_DISABLE_SANDBOX_THIS_IS_DANGEROUS=1
           timeout 35s xvfb-run -a ./Nexo-x86_64.AppImage 2>&1 | tee appimage-smoke.log
           grep -q 'NEXO_SMOKE_OK' appimage-smoke.log
+
+      - name: Visual smoke test screenshot
+        run: |
+          set -euo pipefail
+          export GDK_BACKEND=x11
+          export WEBKIT_DISABLE_SANDBOX_THIS_IS_DANGEROUS=1
+          xvfb-run -a sh -c 'timeout 12s ./Nexo-x86_64.AppImage >/tmp/nexo-visual.log 2>&1 & pid=$!; sleep 5; import -window root nexo-webview-screen.png || true; kill $pid 2>/dev/null || true; wait $pid 2>/dev/null || true'
+          test -s nexo-webview-screen.png
+
+      - name: Upload diagnostics
+        uses: actions/upload-artifact@v4
+        with:
+          name: nexo-diagnostics
+          path: |
+            nexo-webview-screen.png
+            native-smoke.log
+            appimage-smoke.log
+          if-no-files-found: error
 
       - name: Upload AppImage
         uses: actions/upload-artifact@v4
