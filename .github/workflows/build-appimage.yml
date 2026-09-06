@@ -30,21 +30,28 @@ jobs:
           cp packaging/icons/nexo.svg AppDir/usr/share/icons/hicolor/scalable/apps/nexo.svg
       - name: Install linuxdeploy and GTK plugin
         run: |
-          curl -L --fail -o linuxdeploy.AppImage https://github.com/linuxdeploy/linuxdeploy/releases/download/continuous/linuxdeploy-x86_64.AppImage
-          curl -L --fail -o linuxdeploy-plugin-gtk.AppImage https://github.com/linuxdeploy/linuxdeploy-plugin-gtk/releases/download/continuous/linuxdeploy-plugin-gtk-x86_64.AppImage
-          chmod +x linuxdeploy.AppImage linuxdeploy-plugin-gtk.AppImage
+          set -euo pipefail
+          curl -L --fail --retry 4 --retry-delay 2 -o linuxdeploy.AppImage https://github.com/linuxdeploy/linuxdeploy/releases/download/continuous/linuxdeploy-x86_64.AppImage
+          chmod +x linuxdeploy.AppImage
           echo "$PWD" >> "$GITHUB_PATH"
+          ./linuxdeploy.AppImage --version
       - name: Build AppImage
         env:
           NO_STRIP: 1
           APPIMAGE_EXTRACT_AND_RUN: 1
         run: |
-          ./linuxdeploy.AppImage --appdir AppDir --desktop-file AppDir/usr/share/applications/nexo.desktop --icon-file AppDir/usr/share/icons/hicolor/scalable/apps/nexo.svg --plugin gtk --output appimage
+          set -euo pipefail
+          ./linuxdeploy.AppImage \
+            --appdir AppDir \
+            --desktop-file AppDir/usr/share/applications/nexo.desktop \
+            --icon-file AppDir/usr/share/icons/hicolor/scalable/apps/nexo.svg \
+            --output appimage
           OUT=$(find . -maxdepth 1 -type f -name '*.AppImage' ! -name 'linuxdeploy*.AppImage' | head -n1)
           test -n "$OUT"
           mv "$OUT" Nexo-x86_64.AppImage
       - name: Smoke test
         run: |
+          set -euo pipefail
           test -s Nexo-x86_64.AppImage
           file Nexo-x86_64.AppImage
       - name: Upload AppImage
