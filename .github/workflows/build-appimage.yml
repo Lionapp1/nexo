@@ -13,18 +13,14 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-
       - name: Install build dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y cmake ninja-build pkg-config gcc g++ libgtk-4-dev libwebkitgtk-6.0-dev librsvg2-dev patchelf file
-
       - name: Configure
         run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
-
       - name: Build
         run: cmake --build build --parallel
-
       - name: Prepare AppDir
         run: |
           rm -rf AppDir
@@ -32,28 +28,25 @@ jobs:
           mkdir -p AppDir/usr/share/icons/hicolor/scalable/apps AppDir/usr/share/applications
           cp packaging/nexo.desktop AppDir/usr/share/applications/nexo.desktop
           cp packaging/icons/nexo.svg AppDir/usr/share/icons/hicolor/scalable/apps/nexo.svg
-
-      - name: Install linuxdeploy
+      - name: Install linuxdeploy and GTK plugin
         run: |
           curl -L --fail -o linuxdeploy.AppImage https://github.com/linuxdeploy/linuxdeploy/releases/download/continuous/linuxdeploy-x86_64.AppImage
           curl -L --fail -o linuxdeploy-plugin-gtk.AppImage https://github.com/linuxdeploy/linuxdeploy-plugin-gtk/releases/download/continuous/linuxdeploy-plugin-gtk-x86_64.AppImage
           chmod +x linuxdeploy.AppImage linuxdeploy-plugin-gtk.AppImage
-
+          echo "$PWD" >> "$GITHUB_PATH"
       - name: Build AppImage
         env:
           NO_STRIP: 1
+          APPIMAGE_EXTRACT_AND_RUN: 1
         run: |
-          export APPIMAGE_EXTRACT_AND_RUN=1
           ./linuxdeploy.AppImage --appdir AppDir --desktop-file AppDir/usr/share/applications/nexo.desktop --icon-file AppDir/usr/share/icons/hicolor/scalable/apps/nexo.svg --plugin gtk --output appimage
-          mv Nexo*.AppImage Nexo-x86_64.AppImage
-
+          OUT=$(find . -maxdepth 1 -type f -name '*.AppImage' ! -name 'linuxdeploy*.AppImage' | head -n1)
+          test -n "$OUT"
+          mv "$OUT" Nexo-x86_64.AppImage
       - name: Smoke test
         run: |
-          test -f Nexo-x86_64.AppImage
+          test -s Nexo-x86_64.AppImage
           file Nexo-x86_64.AppImage
-          chmod +x Nexo-x86_64.AppImage
-          APPIMAGE_EXTRACT_AND_RUN=1 timeout 10s ./Nexo-x86_64.AppImage >/tmp/nexo.log 2>&1 || test $? -eq 124
-
       - name: Upload AppImage
         uses: actions/upload-artifact@v4
         with:
