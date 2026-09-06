@@ -11,6 +11,8 @@ struct _NexoApp {
     GtkWidget *window, *address, *back, *forward, *reload, *stop, *tabs, *stack;
     GPtrArray *pages;
     guint next_tab_id;
+    gboolean smoke_test;
+    gboolean smoke_done;
 };
 
 struct _NexoTab {
@@ -126,6 +128,40 @@ static void load_changed(WebKitWebView *v, WebKitLoadEvent e, gpointer d) {
         if (current(t->app) == t) uri_changed(G_OBJECT(v), NULL, t);
         nav_state(t->app);
     }
+    if (e == WEBKIT_LOAD_FINISHED) {
+        const gchar *uri = webkit_web_view_get_uri(v);
+        const gchar *title = webkit_web_view_get_title(v);
+        g_message("Nexo WebView loaded: %s | title=%s", uri ? uri : "(null)", title ? title : "(null)");
+        if (t->app->smoke_test && !t->app->smoke_done) {
+            t->app->smoke_done = TRUE;
+            g_print("NEXO_SMOKE_OK uri=%s title=%s\n", uri ? uri : "", title ? title : "");
+            g_application_quit(G_APPLICATION(gtk_window_get_application(GTK_WINDOW(t->app->window))));
+        }
+    }
+}
+
+static gboolean load_failed(WebKitWebView *v, WebKitLoadEvent e, gchar *failing_uri, GError *error, gpointer d) {
+    NexoTab *t = d;
+    g_warning("Nexo WebView load failed: event=%d uri=%s error=%s", e,
+              failing_uri ? failing_uri : "(null)", error ? error->message : "(unknown)");
+    if (t->app->smoke_test && !t->app->smoke_done) {
+        t->app->smoke_done = TRUE;
+        g_printerr("NEXO_SMOKE_FAIL uri=%s error=%s\n",
+                   failing_uri ? failing_uri : "", error ? error->message : "unknown");
+        g_application_quit(G_APPLICATION(gtk_window_get_application(GTK_WINDOW(t->app->window))));
+    }
+    return FALSE;
+}
+
+static void web_process_terminated(WebKitWebView *v, WebKitWebProcessTerminationReason reason, gpointer d) {
+    (void)v;
+    NexoTab *t = d;
+    g_warning("Nexo WebKit web process terminated: reason=%d", reason);
+    if (t->app->smoke_test && !t->app->smoke_done) {
+        t->app->smoke_done = TRUE;
+        g_printerr("NEXO_SMOKE_FAIL web-process-terminated reason=%d\n", reason);
+        g_application_quit(G_APPLICATION(gtk_window_get_application(GTK_WINDOW(t->app->window))));
+    }
 }
 
 static void close_tab(GtkButton *b, gpointer d);
@@ -187,11 +223,9 @@ static void new_tab(NexoApp *a, const gchar *u) {
     webkit_settings_set_enable_site_specific_quirks(s, TRUE);
     webkit_settings_set_enable_media_stream(s, TRUE);
 
-    t->page = gtk_scrolled_window_new();
+    t->page = GTK_WIDGET(t->view);
     gtk_widget_set_hexpand(t->page, TRUE);
     gtk_widget_set_vexpand(t->page, TRUE);
-    gtk_scrolled_window_set_policy(GTK_SCROLLED_WINDOW(t->page), GTK_POLICY_AUTOMATIC, GTK_POLICY_AUTOMATIC);
-    gtk_scrolled_window_set_child(GTK_SCROLLED_WINDOW(t->page), GTK_WIDGET(t->view));
     t->stack_name = g_strdup_printf("tab-%u", t->id);
     gtk_stack_add_named(GTK_STACK(a->stack), t->page, t->stack_name);
 
@@ -216,6 +250,8 @@ static void new_tab(NexoApp *a, const gchar *u) {
     g_signal_connect(t->view, "notify::title", G_CALLBACK(title_changed), t);
     g_signal_connect(t->view, "notify::uri", G_CALLBACK(uri_changed), t);
     g_signal_connect(t->view, "load-changed", G_CALLBACK(load_changed), t);
+    g_signal_connect(t->view, "load-failed", G_CALLBACK(load_failed), t);
+    g_signal_connect(t->view, "web-process-terminated", G_CALLBACK(web_process_terminated), t);
     g_signal_connect(t->view, "decide-policy", G_CALLBACK(policy), a);
 
     g_ptr_array_add(a->pages, t);
@@ -247,6 +283,7 @@ static void activate(GtkApplication *g, gpointer u) {
     NexoApp *a = g_new0(NexoApp, 1);
     a->pages = g_ptr_array_new();
     a->next_tab_id = 1;
+    a->smoke_test = g_getenv("NEXO_SMOKE_TEST") != NULL;
 
     a->window = gtk_application_window_new(g);
     gtk_window_set_title(GTK_WINDOW(a->window), "Nexo Browser");
@@ -294,6 +331,8 @@ static void activate(GtkApplication *g, gpointer u) {
     a->stack = gtk_stack_new();
     gtk_widget_set_hexpand(a->stack, TRUE);
     gtk_widget_set_vexpand(a->stack, TRUE);
+    gtk_stack_set_hhomogeneous(GTK_STACK(a->stack), FALSE);
+    gtk_stack_set_vhomogeneous(GTK_STACK(a->stack), FALSE);
     gtk_stack_set_transition_type(GTK_STACK(a->stack), GTK_STACK_TRANSITION_TYPE_NONE);
 
     gtk_box_append(GTK_BOX(root), toolbar);
