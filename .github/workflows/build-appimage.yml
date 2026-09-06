@@ -13,30 +13,66 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
       - name: Install build dependencies
         run: |
+          set -euo pipefail
           sudo apt-get update
-          sudo apt-get install -y cmake ninja-build pkg-config gcc g++ libgtk-4-dev libwebkitgtk-6.0-dev librsvg2-dev patchelf file
+          sudo apt-get install -y cmake ninja-build pkg-config gcc g++ libgtk-4-dev libwebkitgtk-6.0-dev librsvg2-dev patchelf file xvfb
+
       - name: Configure
         run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=/usr
+
       - name: Build
         run: cmake --build build --parallel
+
       - name: Prepare AppDir
         run: |
+          set -euo pipefail
           rm -rf AppDir
           DESTDIR="$PWD/AppDir" cmake --install build
           mkdir -p AppDir/usr/share/icons/hicolor/scalable/apps AppDir/usr/share/applications
           cp packaging/nexo.desktop AppDir/usr/share/applications/nexo.desktop
           cp packaging/icons/nexo.svg AppDir/usr/share/icons/hicolor/scalable/apps/nexo.svg
           test -x AppDir/usr/bin/nexo
-      - name: Install linuxdeploy
+
+          # WebKitGTK launches WebKitWebProcess/WebKitNetworkProcess/WebKitGPUProcess
+          # as auxiliary executables. Bundle them explicitly so the AppImage can
+          # render real pages instead of starting with a blank WebView.
+          process_dir="$(dirname "$(find /usr -type f -name WebKitWebProcess -print -quit)")"
+          test -n "$process_dir"
+          test -x "$process_dir/WebKitWebProcess"
+          mkdir -p AppDir/usr/bin/webkit-processes
+          for process in WebKitWebProcess WebKitNetworkProcess WebKitGPUProcess; do
+            if [ -x "$process_dir/$process" ]; then
+              cp -a "$process_dir/$process" AppDir/usr/bin/webkit-processes/
+            fi
+          done
+          if [ -d "$process_dir/injected-bundle" ]; then
+            cp -a "$process_dir/injected-bundle" AppDir/usr/bin/webkit-processes/
+          fi
+          test -x AppDir/usr/bin/webkit-processes/WebKitWebProcess
+          test -x AppDir/usr/bin/webkit-processes/WebKitNetworkProcess
+
+      - name: Smoke test native build with real WebView
+        run: |
+          set -euo pipefail
+          export WEBKIT_EXEC_PATH="$PWD/AppDir/usr/bin/webkit-processes"
+          export NEXO_SMOKE_TEST=1
+          export GDK_BACKEND=x11
+          timeout 30s xvfb-run -a ./AppDir/usr/bin/nexo 2>&1 | tee native-smoke.log
+          grep -q 'NEXO_SMOKE_OK' native-smoke.log
+
+      - name: Install linuxdeploy and appimagetool
         run: |
           set -euo pipefail
           curl -L --fail --retry 4 --retry-delay 2 -o linuxdeploy.AppImage https://github.com/linuxdeploy/linuxdeploy/releases/download/continuous/linuxdeploy-x86_64.AppImage
-          chmod +x linuxdeploy.AppImage
-          echo "$PWD" >> "$GITHUB_PATH"
+          curl -L --fail --retry 4 --retry-delay 2 -o appimagetool.AppImage https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-x86_64.AppImage
+          chmod +x linuxdeploy.AppImage appimagetool.AppImage
           ./linuxdeploy.AppImage --version
-      - name: Build AppImage
+          ./appimagetool.AppImage --version || true
+
+      - name: Bundle AppDir dependencies
         env:
           NO_STRIP: 1
           APPIMAGE_EXTRACT_AND_RUN: 1
@@ -46,16 +82,40 @@ jobs:
             --appdir AppDir \
             --desktop-file AppDir/usr/share/applications/nexo.desktop \
             --icon-file AppDir/usr/share/icons/hicolor/scalable/apps/nexo.svg \
-            --executable AppDir/usr/bin/nexo \
-            --output appimage
-          OUT=$(find . -maxdepth 1 -type f -name '*.AppImage' ! -name 'linuxdeploy*.AppImage' | head -n1)
-          test -n "$OUT"
-          mv "$OUT" Nexo-x86_64.AppImage
-      - name: Smoke test
+            --executable AppDir/usr/bin/nexo
+
+          # linuxdeploy can create an AppRun, but Nexo needs an explicit WebKit
+          # subprocess path because those helpers are loaded dynamically.
+          cat > AppDir/AppRun <<'EOF'
+          #!/bin/sh
+          set -eu
+          HERE="$(CDPATH= cd -- "$(dirname -- "$(readlink -f -- "$0")")" && pwd)"
+          export LD_LIBRARY_PATH="$HERE/usr/lib:$HERE/usr/lib/x86_64-linux-gnu:${LD_LIBRARY_PATH:-}"
+          export WEBKIT_EXEC_PATH="$HERE/usr/bin/webkit-processes"
+          exec "$HERE/usr/bin/nexo" "$@"
+          EOF
+          chmod +x AppDir/AppRun
+          test -x AppDir/AppRun
+          test -x AppDir/usr/bin/webkit-processes/WebKitWebProcess
+          test -x AppDir/usr/bin/webkit-processes/WebKitNetworkProcess
+
+      - name: Build AppImage
+        env:
+          APPIMAGE_EXTRACT_AND_RUN: 1
         run: |
           set -euo pipefail
+          ./appimagetool.AppImage AppDir Nexo-x86_64.AppImage
           test -s Nexo-x86_64.AppImage
           file Nexo-x86_64.AppImage
+
+      - name: Smoke test AppImage with real WebView
+        run: |
+          set -euo pipefail
+          export NEXO_SMOKE_TEST=1
+          export GDK_BACKEND=x11
+          timeout 35s xvfb-run -a ./Nexo-x86_64.AppImage 2>&1 | tee appimage-smoke.log
+          grep -q 'NEXO_SMOKE_OK' appimage-smoke.log
+
       - name: Upload AppImage
         uses: actions/upload-artifact@v4
         with:
